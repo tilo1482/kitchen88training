@@ -31,7 +31,8 @@
     min-height: 100vh;
   }
   .screen { display: none; min-height: 100vh; }
-  .screen.active { display: block; }
+  .screen.active { display: block; animation: screenIn .28s cubic-bezier(.22,.61,.36,1); }
+  @keyframes screenIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
   .wrap { max-width: 720px; margin: 0 auto; padding: 20px 16px 80px; }
   .center-wrap { max-width: 400px; margin: 0 auto; padding: 48px 20px; }
 
@@ -202,8 +203,10 @@
   .dropdown {
     display: none; position: absolute; right: 0; top: 42px; background: #fff; border: 1px solid var(--line);
     border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); min-width: 190px; overflow: hidden; z-index: 30;
+    transform-origin: top right;
   }
-  .dropdown.active { display: block; }
+  .dropdown.active { display: block; animation: dropdownIn .16s cubic-bezier(.22,.61,.36,1); }
+  @keyframes dropdownIn { from { opacity: 0; transform: scale(.95) translateY(-4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
   .dropdown button {
     display: block; width: 100%; text-align: left; padding: 12px 14px; background: none; border: none;
     font-size: 14px; color: var(--ink); border-bottom: 1px solid var(--line);
@@ -294,7 +297,6 @@
         <div class="settings-menu">
           <button class="avatar-btn" id="menuBtn" title="Settings" style="font-size:16px; letter-spacing:1px;">&#9776;</button>
           <div class="dropdown" id="settingsDropdown">
-            <button id="syncBtn">↻ Sync Now</button>
             <button id="manageRolesBtn">Manage Roles</button>
             <button id="changeSharedPassBtn" style="display:none;">Change Shared Password</button>
             <button class="danger" id="resetDataBtn" style="display:none;">Reset Sample Data</button>
@@ -311,6 +313,9 @@
     </div>
   </header>
   <div class="wrap">
+    <div id="pullIndicator" style="height:0; overflow:hidden; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:12px; font-weight:600; transition:height .15s;">
+      <span id="pullIndicatorText">Pull to refresh</span>
+    </div>
     <div class="card overview-card" id="overviewCard">
       <div class="overview-stat"><div class="num" id="statTotal">0</div><div class="lbl">In Training</div></div>
       <div class="overview-stat"><div class="num" id="statTrained">0</div><div class="lbl">Trained</div></div>
@@ -414,6 +419,10 @@
         <textarea id="newNoteText" placeholder="Add a note about this employee's progress..."></textarea>
         <button class="btn secondary small" id="addNoteBtn" style="margin-top:8px;">Add Note</button>
       </div>
+    </div>
+
+    <div class="no-print" style="text-align:center; margin-top:22px;">
+      <button id="deleteEmpBtn" style="background:none; border:none; color:var(--danger); font-size:13px; padding:8px;">Delete Employee</button>
     </div>
   </div>
 </div>
@@ -878,6 +887,13 @@ async function demoApi(action, payload) {
       save();
       return { ok: true };
     }
+    case 'deleteEmployee': {
+      store.employees = store.employees.filter(e => e.id !== payload.employeeId);
+      delete store.progress[payload.employeeId];
+      delete store.notes[payload.employeeId];
+      save();
+      return { ok: true };
+    }
     case 'toggleItem': {
       if (!store.progress[payload.employeeId]) store.progress[payload.employeeId] = {};
       store.progress[payload.employeeId][payload.roleId + '::' + payload.itemId] = { completed: payload.completed, by: who, at: new Date().toISOString() };
@@ -1200,16 +1216,24 @@ $('submitAddEmp').addEventListener('click', async () => {
   if (!name) { $('addEmpError').innerHTML = '<div class="error-box">Enter the employee\'s name.</div>'; return; }
   if (!store) { $('addEmpError').innerHTML = '<div class="error-box">Select which store they\'re training for.</div>'; return; }
   if (!roles.length) { $('addEmpError').innerHTML = '<div class="error-box">Select at least one role.</div>'; return; }
-  $('submitAddEmp').disabled = true;
+
+  // Optimistic add: show it immediately, save in the background, roll back on failure.
+  const tempId = 'temp_' + Date.now();
+  const newEmp = { id: tempId, name, startDate, store, roles, status: 'training', createdAt: new Date().toISOString() };
+  STATE.employees.unshift(newEmp);
+  $('addModalBackdrop').classList.remove('active');
+  renderDashboard();
+
   try {
-    await api('addEmployee', { name, startDate, store, roles });
-    $('addModalBackdrop').classList.remove('active');
+    const res = await api('addEmployee', { name, startDate, store, roles });
+    newEmp.id = res.id;
+    if (currentEmployeeId === tempId) currentEmployeeId = res.id;
     toast('Employee added');
-    await loadData(false);
   } catch (err) {
-    $('addEmpError').innerHTML = '<div class="error-box">' + err.message + '</div>';
-  } finally {
-    $('submitAddEmp').disabled = false;
+    STATE.employees = STATE.employees.filter(e => e.id !== tempId);
+    if (currentEmployeeId === tempId) { currentEmployeeId = null; showScreen('screen-dashboard'); }
+    renderDashboard();
+    toast('Failed to save ' + name + ': ' + err.message);
   }
 });
 
@@ -1391,31 +1415,101 @@ function renderNotes(empId) {
 $('addNoteBtn').addEventListener('click', async () => {
   const text = $('newNoteText').value.trim();
   if (!text || !currentEmployeeId) return;
-  $('addNoteBtn').disabled = true;
+  const empId = currentEmployeeId;
+  const tempId = 'temp_' + Date.now();
+  const tempNote = { id: tempId, author: (SESSION.displayName || SESSION.username), timestamp: new Date().toISOString(), text };
+  if (!STATE.notes[empId]) STATE.notes[empId] = [];
+  STATE.notes[empId].push(tempNote);
+  $('newNoteText').value = '';
+  renderNotes(empId);
   try {
-    await api('addNote', { employeeId: currentEmployeeId, text });
-    $('newNoteText').value = '';
-    await loadData(false);
-    toast('Note added');
+    const res = await api('addNote', { employeeId: empId, text });
+    tempNote.id = res.id;
   } catch (err) {
-    toast('Error: ' + err.message);
+    STATE.notes[empId] = STATE.notes[empId].filter(n => n.id !== tempId);
+    renderNotes(empId);
+    toast('Failed to save note: ' + err.message);
+  }
+});
+
+$('deleteEmpBtn').addEventListener('click', async () => {
+  const emp = STATE.employees.find(e => e.id === currentEmployeeId);
+  if (!emp) return;
+  if (!confirm('Delete ' + emp.name + '? This removes their record and progress, and cannot be undone.')) return;
+  const empId = emp.id;
+  $('deleteEmpBtn').disabled = true;
+  try {
+    await api('deleteEmployee', { employeeId: empId });
+    STATE.employees = STATE.employees.filter(e => e.id !== empId);
+    delete STATE.progress[empId];
+    delete STATE.notes[empId];
+    currentEmployeeId = null;
+    showScreen('screen-dashboard');
+    renderDashboard();
+    toast('Employee deleted');
+  } catch (err) {
+    toast('Failed to delete: ' + err.message);
   } finally {
-    $('addNoteBtn').disabled = false;
+    $('deleteEmpBtn').disabled = false;
   }
 });
 
 $('printBtn').addEventListener('click', () => window.print());
 
 /* =====================================================
-   SETTINGS MENU (sync / reset / manage roles)
+   PULL TO REFRESH (dashboard only)
+   Pulling down while already scrolled to the top syncs data,
+   replacing the old manual Sync button.
+   ===================================================== */
+(() => {
+  const wrap = document.querySelector('#screen-dashboard .wrap');
+  const indicator = $('pullIndicator');
+  const indicatorText = $('pullIndicatorText');
+  const THRESHOLD = 70;
+  let startY = 0;
+  let pulling = false;
+  let refreshing = false;
+
+  document.addEventListener('touchstart', e => {
+    if (!$('screen-dashboard').classList.contains('active') || refreshing) return;
+    if (window.scrollY > 0) { pulling = false; return; }
+    startY = e.touches[0].clientY;
+    pulling = true;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling || refreshing) return;
+    const delta = e.touches[0].clientY - startY;
+    if (delta <= 0) { indicator.style.height = '0'; return; }
+    const height = Math.min(delta * 0.5, 90);
+    indicator.style.height = height + 'px';
+    indicatorText.textContent = height >= THRESHOLD ? 'Release to sync' : 'Pull to refresh';
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (!pulling || refreshing) return;
+    pulling = false;
+    const height = parseInt(indicator.style.height || '0', 10);
+    if (height >= THRESHOLD) {
+      refreshing = true;
+      indicator.style.height = '40px';
+      indicatorText.textContent = 'Syncing...';
+      loadData(false).finally(() => {
+        refreshing = false;
+        indicator.style.height = '0';
+      });
+    } else {
+      indicator.style.height = '0';
+    }
+  });
+})();
+
+/* =====================================================
+   SETTINGS MENU (reset / manage roles / shared password)
    ===================================================== */
 $('menuBtn').addEventListener('click', () => $('settingsDropdown').classList.toggle('active'));
 document.addEventListener('click', e => {
   if (!e.target.closest('#menuBtn') && !e.target.closest('#settingsDropdown')) $('settingsDropdown').classList.remove('active');
-});
-$('syncBtn').addEventListener('click', () => {
-  $('settingsDropdown').classList.remove('active');
-  loadData(true);
 });
 $('resetDataBtn').addEventListener('click', () => {
   $('settingsDropdown').classList.remove('active');
